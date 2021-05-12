@@ -1,14 +1,43 @@
-#!/usr/local/bin/logenv python3
+#!/usr/bin/env python3
 
 import logging
-import traceback
-import select, socket, struct, random
+import traceback, argparse
+import select, socket, socks, struct, random
 from socketserver import ThreadingMixIn, TCPServer, StreamRequestHandler
 
 
 SOCKS_VERSION = 5
 SO_ORIGINAL_DST = 80
 
+
+def str2ipport(addr=None, dport=None, ad=True):
+  def parse(s):
+    if s == 'direct':
+      if not ad:
+        raise argparse.ArgumentTypeError("mode 'direct' not valid for this parameter")
+      return None
+    ipport = s.rsplit(':',1)
+    if len(ipport) != 2:
+      if ipport[0].isnumeric():
+        if not addr:
+          raise argparse.ArgumentTypeError("address required")
+        return (addr, int(ipport[0]))
+      else:
+        if not dport:
+          raise argparse.ArgumentTypeError("port required")
+        return (ipport[0], dport)
+    if not ipport[1].isnumeric():
+      raise argparse.ArgumentTypeError("invalid port")
+    return (ipport[0],int(ipport[1]))
+  return parse
+
+def mksocket(via):
+  if not via:
+    return socket.socket()
+  else:
+    s = socks.socksocket()
+    s.set_proxy(socks.SOCKS5, via[0], via[1])
+    return s
 
 class ThreadingTCPServer(ThreadingMixIn, TCPServer):
   pass
@@ -65,7 +94,7 @@ class SocksProxy(StreamRequestHandler):
       self.remote_address = self.remote_address.decode()
     self.remote_port = struct.unpack('!H', self.connection.recv(2))[0]
 
-    res = self.remote_address.split('>', 2)
+    res = self.remote_address.split('>', 1)
     if len(res) == 2:
       self.remote_address = res[1]
       self.remote_domain = res[0]
@@ -140,7 +169,7 @@ def pipe_sockets(sa, sb, b2a_buf=None, a2b_buf=None, logprefix=''):
 class Transparent(SocksProxy):
   def remote_connect(self):
     logging.info(f'{self.id}: Connecting to remote {self.remote_address}:{self.remote_port}')
-    s = socket.socket()
+    s = mksocket(args.via)
     s.connect((self.remote_address, self.remote_port))
     self.sdirect = s
 
@@ -155,5 +184,9 @@ class Transparent(SocksProxy):
 
 if __name__ == '__main__':
   logging.root.setLevel(logging.NOTSET)
-  with ThreadingTCPServer(('127.0.0.1', 2666), Transparent) as server:
+  parser = argparse.ArgumentParser(description='socks plain to tls proxy', formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+  parser.add_argument('-l', '--listen', type=str2ipport('127.0.0.1', 2666, False), help='IP:PORT to listen on', default='127.0.0.1:2666')
+  parser.add_argument('-c', '--via', type=str2ipport(), help='IP:PORT of socks proxy to connect to, or "direct" for none', default='direct')
+  args = parser.parse_args()
+  with ThreadingTCPServer(args.listen, Transparent) as server:
     server.serve_forever()
