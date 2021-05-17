@@ -4,7 +4,7 @@ import logging
 import argparse
 import socket, struct, random
 import ssl, threading, socks, ctypes
-from socksproxy import SocksProxy, pipe_sockets, str2ipport, mksocket
+from socksproxy import SocksProxy, pipe_sockets, str2ipport, mksocket, setprocname
 from tempfile import TemporaryFile
 from OpenSSL import crypto
 from contextlib import contextmanager
@@ -226,6 +226,7 @@ class TLSStripper(SocksProxy):
 
 if __name__ == '__main__':
   logging.root.setLevel(logging.NOTSET)
+  setprocname(__file__)
   parser = argparse.ArgumentParser(description='socks plain to tls proxy', formatter_class=argparse.ArgumentDefaultsHelpFormatter)
   parser.add_argument('-l', '--listen', type=str2ipport('0.0.0.0',1666, False), help='IP:PORT to listen on', default='0.0.0.0:1666')
   parser.add_argument('-c', '--via', type=str2ipport(), help='IP:PORT of socks proxy to connect to for undecryptable traffic, or "direct" for none', default='127.0.0.1:2666')

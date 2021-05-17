@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import logging
+import ctypes, os
 import traceback, argparse
 import select, socket, socks, struct, random
 from socketserver import ThreadingMixIn, TCPServer, StreamRequestHandler
@@ -8,6 +9,11 @@ from socketserver import ThreadingMixIn, TCPServer, StreamRequestHandler
 
 SOCKS_VERSION = 5
 SO_ORIGINAL_DST = 80
+
+
+def setprocname(file):
+  name = os.path.basename(file)
+  ctypes.CDLL(None).prctl(15, name.encode(), 0, 0, 0)
 
 
 def str2ipport(addr=None, dport=None, ad=True):
@@ -45,11 +51,18 @@ ThreadingTCPServer.allow_reuse_address = True
 
 
 class SocksProxy(StreamRequestHandler):
+  def rconnect(self, s, via):
+    if not via or self.remote_address == self.remote_domain:
+      s.connect((self.remote_address, self.remote_port))
+    else:
+      s.connect((self.remote_domain+'>'+self.remote_address, self.remote_port))
+
   def handle(self):
     self.sdirect = None
     SocksProxy.id = SocksProxy.id + 1
     self.id = SocksProxy.id
-    logging.info(f'{self.id}: Accepting connection from {self.client_address[0]}:{self.client_address[1]}')
+    self.logger = logging.getLogger(f's{self.id}')
+    self.logger.info(f'Accepting connection from {self.client_address[0]}:{self.client_address[1]}')
 
     transparent = False
     try:
@@ -120,8 +133,8 @@ class SocksProxy(StreamRequestHandler):
 SocksProxy.id = 0
 
 
-def pipe_sockets(sa, sb, b2a_buf=None, a2b_buf=None, logprefix=''):
-  logging.info(f"{logprefix}pipe_sockets started")
+def pipe_sockets(sa, sb, b2a_buf=None, a2b_buf=None, logprefix='', logger=logging):
+  logger.info(f"{logprefix}pipe_sockets started")
   try:
     a2b = True
     b2a = True
@@ -138,20 +151,25 @@ def pipe_sockets(sa, sb, b2a_buf=None, a2b_buf=None, logprefix=''):
       if len(b2a_buf) != 0: wsl.add(sa)
       rs, ws, es = select.select(rsl, wsl, [])
       if len(es):
-        logging.info()
         break
       if sa in rs:
         a2b_buf = sa.recv(16 * 4096)
         if len(a2b_buf) == 0:
           a2b = False
-          logging.info(f"{logprefix}pipe_sockets sa -> sb EOF")
-          sb.shutdown(socket.SHUT_WR)
+          logger.info(f"{logprefix}pipe_sockets sa -> sb EOF")
+          try:
+            sb.shutdown(socket.SHUT_WR)
+          except OSError as error:
+            pass
       if sb in rs:
         b2a_buf = sb.recv(16 * 4096)
         if len(b2a_buf) == 0:
           b2a = False
-          logging.info(f"{logprefix}pipe_sockets sb -> sa EOF")
-          sa.shutdown(socket.SHUT_WR)
+          logger.info(f"{logprefix}pipe_sockets sb -> sa EOF")
+          try:
+            sa.shutdown(socket.SHUT_WR)
+          except OSError as error:
+            pass
       if len(a2b_buf) != 0 and sb in ws:
         nbytes = sb.send(a2b_buf)
         if nbytes > 0:
@@ -163,19 +181,19 @@ def pipe_sockets(sa, sb, b2a_buf=None, a2b_buf=None, logprefix=''):
   finally:
     sa.close()
     sb.close()
-    logging.info(f"{logprefix}pipe_sockets done")
+    logger.info(f"{logprefix}pipe_sockets done")
 
 
 class Transparent(SocksProxy):
   def remote_connect(self):
-    logging.info(f'{self.id}: Connecting to remote {self.remote_address}:{self.remote_port}')
+    self.logger.info(f'{self.id}: Connecting to remote {self.remote_address}:{self.remote_port}')
     s = mksocket(args.via)
-    s.connect((self.remote_address, self.remote_port))
+    self.rconnect(s, args.via)
     self.sdirect = s
 
   def handle_socks(self):
-    logging.info(f'{self.id}: Socks5 connection established')
-    pipe_sockets(self.sdirect, self.connection, logprefix=f"{self.id}: ")
+    self.logger.info(f'{self.id}: Socks5 connection established')
+    pipe_sockets(self.sdirect, self.connection, logger=self.logger)
 
   def cleanup(self):
     if self.sdirect:
@@ -184,6 +202,7 @@ class Transparent(SocksProxy):
 
 if __name__ == '__main__':
   logging.root.setLevel(logging.NOTSET)
+  setprocname(__file__)
   parser = argparse.ArgumentParser(description='socks plain to tls proxy', formatter_class=argparse.ArgumentDefaultsHelpFormatter)
   parser.add_argument('-l', '--listen', type=str2ipport('127.0.0.1', 2666, False), help='IP:PORT to listen on', default='127.0.0.1:2666')
   parser.add_argument('-c', '--via', type=str2ipport(), help='IP:PORT of socks proxy to connect to, or "direct" for none', default='direct')
