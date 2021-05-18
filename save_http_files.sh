@@ -176,7 +176,7 @@ recombine_extm3u(){
         then url2local "${newlines[$i]}"
       elif [ "$i" -ge "$oldsequence" ] && [ "$i" -lt "$oseq_end" ]
         then url2local "${oldlines[$i]}"
-        else echo $?
+        else echo ?
       fi
       i="$(expr "$i" + 1)"
     done
