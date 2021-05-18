@@ -1,6 +1,6 @@
 #!/bin/bash
 
-set -ex
+set -e
 
 exec 99<&0 0</dev/null
 
