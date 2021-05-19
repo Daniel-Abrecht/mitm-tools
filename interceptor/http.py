@@ -135,7 +135,7 @@ async def read_response_content(self, S, o, stransfer_encoding, scontent_encodin
       async for chunk in read_content_length(self, S, o, scontent_length):
         yield chunk
     else:
-      while not S.EOF:
+      while not S.SP.EOF:
         chunk = S.read(o[0], 1, 4096)
         o[0] += chunk
         yield chunk
