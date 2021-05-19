@@ -15,12 +15,34 @@ quote(){
 
 domain="$1"; shift
 location="$1"; shift
-dest=":$(sed "s|/|∕|g" <<<"$domain$location")"
+
+url2local(){
+  local url="$1"
+  local d=
+  local l=
+  local rpath=
+  printf '%s:' "$2"
+  if grep -q '^[a-zA-Z0-9+-]*://' <<<"$url"
+    then rpath="$(sed 's|^[a-zA-Z0-9+-]*://||' <<<"$url")"
+  elif [ "${url[0]}" = / ]
+    then rpath="$domain$url"
+    else rpath="$domain$(dirname "$(grep -o '^[^?]*' <<<"$location")XXX" | grep -v '^\.$')/$url"
+  fi
+  IFS='/'
+  read d l <<<"$rpath"
+  IFS="$OLDIFS"
+  echo "$d-$(sha256sum <<<"$l" | grep -o '^[^ ]*')"
+}
+
+url="https://$domain$location"
+dest="$(url2local "$url")"
 
 exec 9>".lock$dest"
 flock 9 || exit 1
 
-echo "$start $end $full $dest"
+suattr(){
+  setfattr -n "user.xdg.origin.url" -v "$url" "$1"
+}
 
 merge_all(){
   prev=
@@ -40,6 +62,7 @@ merge_all(){
         echo "Merging part $next-$nend offset $skip to $prev-$pend offset $seek"
         dd bs=4096 seek="$seek" skip="$skip" if="$next.part" of="$prev.part" iflag=skip_bytes oflag=seek_bytes conv=notrunc
         rm "$next.part"
+        suattr "$prev.part"
       fi
     fi
     prev="$next"
@@ -68,6 +91,7 @@ save_partial(){
   echo "Saving part $start-$end offset $seek at: $(quote "d$dest")/$f.part"
   count="$(bc <<<"$end - $start")"
   dd bs=4096 seek="$seek" of="$f.part" count="$count" iflag=skip_bytes,count_bytes oflag=seek_bytes conv=notrunc <&99
+  suattr "$f.part"
   if [ "$f" = 0 ]
     then ln -f "0.part" "../f$dest"
   fi
@@ -106,32 +130,25 @@ else
   dd bs=4096 of="f$dest" conv=notrunc <&99
 fi
 
-url2local(){
-  url="$1"
-  printf 'f:'
-  if grep -q '^[a-zA-Z0-9+-]*://' <<<"$url"
-    then sed 's|^[a-zA-Z0-9+-]*://||;s|/|∕|g' <<<"$url"
-  elif [ "${url[0]}" = / ]
-    then sed 's|/|∕|g' <<<"$domain$url"
-    else sed 's|/|∕|g' <<<"$domain$(dirname "$(grep -o '^[^?]*' <<<"$location")XXX" | grep -v '^\.$')/$url"
-  fi
-}
+if [ -f "f$dest" ]
+  then suattr "f$dest"
+fi
 
 recombine_extm3u(){
 
   sequence="$(grep '#EXT-X-MEDIA-SEQUENCE:' <"f$dest" | head -n 1 | grep -o '[0-9]*' | head -c 1)"
   IFS=$'\n'
-  newlines=( $(grep -v '^[#]\|^$' <"f$dest") )
+  newlines=( $(grep -v '^[#]\|^$\|^\s*$' <"f$dest") )
   IFS="$OLDIFS"
   oldlines=()
 
-  if [ -f "m3u$dest" ]
+  if [ -f "m3u$dest.m3u8" ]
   then
     IFS=$'\n'
-    oldsequence="$(grep '#EXT-X-MEDIA-SEQUENCE:' <"m3u$dest" | head -n 1 | grep -o '[0-9]*' | head -c 1)"
+    oldsequence="$(grep '#EXT-X-MEDIA-SEQUENCE:' <"m3u$dest.m3u8" | head -n 1 | grep -o '[0-9]*' | head -c 1)"
     IFS="$OLDIFS"
     if [ -n "$oldsequence" ] && [ -n "$sequence" ]
-      then oldlines=( $(grep -v '^[#]\|^$' <"m3u$dest") )
+      then oldlines=( $(grep -v '^[#]\|^$\|^\s*$' <"m3u$dest.m3u8") )
       else oldsequence="$sequence"
     fi
   fi
@@ -144,9 +161,10 @@ recombine_extm3u(){
         then echo "#EXT-X-MEDIA-SEQUENCE: $sequence"
       fi
       for entry in "${newlines[@]}"
-        do url2local "$entry"
+        do url2local "$entry" f
       done
-    ) >"m3u$dest"
+    ) >"m3u$dest.m3u8"
+    return
   fi
 
   sequence_min="$sequence"
@@ -163,25 +181,37 @@ recombine_extm3u(){
 
   # Sequences probably unrelated
   if [ "$(bc <<<"$sequence_max - $sequence_min")" -gt 100000 ]
-    then return # TODO: just copy new file
+  then
+    (
+      echo "#EXTM3U"
+      if [ -n "$sequence" ]
+        then echo "#EXT-X-MEDIA-SEQUENCE: $sequence"
+      fi
+      for entry in "${newlines[@]}"
+        do url2local "$entry" f
+      done
+    ) >"m3u$dest.m3u8"
+    return
   fi
 
   (
     echo "#EXTM3U"
     echo "#EXT-X-MEDIA-SEQUENCE: $sequence_min"
     i="$sequence_min"
-    while [ "$i" -le "$sequence_max" ]
+    while [ "$i" -lt "$sequence_max" ]
     do
       if [ "$i" -ge "$sequence" ] && [ "$i" -lt "$nseq_end" ]
-        then url2local "${newlines[$i]}"
+        then url2local "${newlines[$i-$sequence]}" f
       elif [ "$i" -ge "$oldsequence" ] && [ "$i" -lt "$oseq_end" ]
-        then url2local "${oldlines[$i]}"
+        then url2local "${oldlines[$i-$oldsequence]}" f
         else echo ?
       fi
       i="$(expr "$i" + 1)"
     done
-  ) >"m3u$dest"
+  ) >"m3u$dest.m3u8"
 }
+
+set +e
 
 if [ -f "f$dest" ]
 then
@@ -189,4 +219,8 @@ then
   if [ "$header" = "#EXTM3U" ]
     then recombine_extm3u
   fi
+fi
+
+if [ -f "m3u$dest.m3u8" ]
+  then suattr "m3u$dest.m3u8"
 fi
