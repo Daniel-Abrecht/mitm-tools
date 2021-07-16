@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 
 import logging
-import ctypes, os
+import ctypes, os, sys, errno
 import traceback, argparse
 import select, socket, socks, struct, random
+import ssl
 from socketserver import ThreadingMixIn, TCPServer, StreamRequestHandler
 
 
@@ -80,8 +81,16 @@ class SocksProxy(StreamRequestHandler):
 
     if transparent:
       assert self.remote_address
-      self.remote_connect()
-      self.handle_socks()
+      try:
+        self.remote_connect()
+        self.handle_socks()
+      except:
+        # If an error occured, reset the conection instead of just closing it
+        self.connection.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack('ii', 1, 0))
+        raise
+      finally:
+        self.cleanup()
+        self.logger.info(f'done')
       return
 
     header = self.connection.recv(2)
@@ -123,19 +132,28 @@ class SocksProxy(StreamRequestHandler):
         reply = struct.pack("!BBBB", SOCKS_VERSION, 0, 0, address_type) + rawaddr + struct.pack("!H", self.remote_port)
       except:
         reply = struct.pack("!BBBBIH", SOCKS_VERSION, 5, 0, address_type, 0, 0)
-        traceback.print_exc()
+        exc_type, exc_value, exc_traceback = sys.exc_info()
+        self.logger.error(f"{exc_value}");
       self.connection.sendall(reply)
       if reply[1] != 0:
         return
-      self.handle_socks()
+      try:
+        self.handle_socks()
+      except:
+        # If an error occured, reset the conection instead of just closing it
+        self.connection.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack('ii', 1, 0))
+        raise
     finally:
       self.cleanup()
+      self.logger.info(f'done')
 SocksProxy.id = 0
 
 
 def pipe_sockets(sa, sb, b2a_buf=None, a2b_buf=None, logprefix='', logger=logging):
   logger.info(f"{logprefix}pipe_sockets started")
   try:
+    sa.setblocking(False)
+    sb.setblocking(False)
     a2b = True
     b2a = True
     if a2b_buf is None:
@@ -149,38 +167,84 @@ def pipe_sockets(sa, sb, b2a_buf=None, a2b_buf=None, logprefix='', logger=loggin
       wsl = set()
       if len(a2b_buf) != 0: wsl.add(sb)
       if len(b2a_buf) != 0: wsl.add(sa)
-      rs, ws, es = select.select(rsl, wsl, [])
+      pending = set()
+      if hasattr(sa, 'pending') and sa in rsl and sa.pending():
+        pending.add(sa)
+      if hasattr(sb, 'pending') and sb in rsl and sb.pending():
+        pending.add(sb)
+      rs, ws, es = select.select(rsl, wsl, [], 0 if len(pending) != 0 else None)
+      rs = {*rs, *pending}
+      ws = {*ws}
       if len(es):
         break
       if sa in rs:
-        a2b_buf = sa.recv(16 * 4096)
-        if len(a2b_buf) == 0:
-          a2b = False
-          logger.info(f"{logprefix}pipe_sockets sa -> sb EOF")
-          try:
-            sb.shutdown(socket.SHUT_WR)
-          except OSError as error:
-            pass
+        try:
+          a2b_buf = sa.recv(16 * 4096)
+        except ssl.SSLWantReadError: pass
+        except ssl.SSLWantWriteError: pass
+        except OSError as e:
+          no = e.args[0]
+          if no != errno.EAGAIN and no != errno.EWOULDBLOCK:
+            raise
+          logger.info(f"{logprefix}pipe_sockets sa -> sb expected data, but there was none")
+        else:
+          if len(a2b_buf) == 0:
+            a2b = False
+            logger.info(f"{logprefix}pipe_sockets sa -> sb EOF")
+            try:
+              sb.shutdown(socket.SHUT_WR)
+            except OSError as error:
+              pass
       if sb in rs:
-        b2a_buf = sb.recv(16 * 4096)
-        if len(b2a_buf) == 0:
-          b2a = False
-          logger.info(f"{logprefix}pipe_sockets sb -> sa EOF")
-          try:
-            sa.shutdown(socket.SHUT_WR)
-          except OSError as error:
-            pass
+        try:
+          b2a_buf = sb.recv(16 * 4096)
+        except ssl.SSLWantReadError: pass
+        except ssl.SSLWantWriteError: pass
+        except OSError as e:
+          no = e.args[0]
+          if no != errno.EAGAIN and no != errno.EWOULDBLOCK:
+            raise
+          logger.info(f"{logprefix}pipe_sockets sb -> sa expected data, but there was none")
+        else:
+          if len(b2a_buf) == 0:
+            b2a = False
+            logger.info(f"{logprefix}pipe_sockets sb -> sa EOF")
+            try:
+              sa.shutdown(socket.SHUT_WR)
+            except OSError as error:
+              pass
       if len(a2b_buf) != 0 and sb in ws:
-        nbytes = sb.send(a2b_buf)
-        if nbytes > 0:
-          a2b_buf = a2b_buf[nbytes:]
+        try:
+          nbytes = sb.send(a2b_buf)
+        except ssl.SSLWantReadError: pass
+        except ssl.SSLWantWriteError: pass
+        except OSError as e:
+          no = e.args[0]
+          if no != errno.EAGAIN and no != errno.EWOULDBLOCK:
+            raise
+        else:
+          if nbytes > 0:
+            a2b_buf = a2b_buf[nbytes:]
       if len(b2a_buf) != 0 and sa in ws:
-        nbytes = sa.send(b2a_buf)
-        if nbytes > 0:
-          b2a_buf = b2a_buf[nbytes:]
+        try:
+          nbytes = sa.send(b2a_buf)
+        except ssl.SSLWantReadError: pass
+        except ssl.SSLWantWriteError: pass
+        except OSError as e:
+          no = e.args[0]
+          if no != errno.EAGAIN and no != errno.EWOULDBLOCK:
+            raise
+        else:
+          if nbytes > 0:
+            b2a_buf = b2a_buf[nbytes:]
+  #except OSError as e: pass
   finally:
-    sa.close()
-    sb.close()
+    try:
+      sa.close()
+    except: pass
+    try:
+      sb.close()
+    except: pass
     logger.info(f"{logprefix}pipe_sockets done")
 
 

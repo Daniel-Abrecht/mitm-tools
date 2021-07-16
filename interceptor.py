@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import re
+import time
 import bisect
 import logging
 import asyncio
@@ -13,6 +14,8 @@ from importlib.machinery import SourceFileLoader
 
 R32 = 0xFFFFFFFF
 ARBITRARY_BUFFER_LIMIT = 1024 * 10 # 10 KiB
+
+job_data_holdback_timeout = 10
 
 config = {}
 mods = {}
@@ -49,6 +52,7 @@ class ReadJob:
     self.future = asyncio.get_event_loop().create_future()
     self.min = min & R32
     self.SP = SP
+    self.time = time.monotonic()
 
   def __lt__(self, other):
     offset = self.SP.offset
@@ -76,6 +80,7 @@ class ShadowProcessor:
     self.to_be_sent = b''
     self.recv_waiting = asyncio.get_event_loop().create_future()
     self.D = None
+    self.last_data_time = time.monotonic()
 
   def send_ready(self):
     return len(self.to_be_sent)
@@ -140,6 +145,7 @@ class ShadowProcessor:
 
   def recv(self):
     assert len(self.data) < ARBITRARY_BUFFER_LIMIT, len(self.data)
+    self.last_data_time = time.monotonic()
     res = self.socket.recv(4096)
     if len(res) == 0:
       self.EOF = True
@@ -166,6 +172,18 @@ class ShadowProcessor:
         job.future.set_result(None)
       if len(self.parsejobs) == 0:
         self.recv_waiting = asyncio.get_event_loop().create_future()
+
+  def check_timeouts(self):
+    if not self.parsejobs:
+      return
+    for job in self.parsejobs:
+      if len(self.data):
+        diff = time.monotonic() - max(job.time, self.last_data_time)
+        if diff > job_data_holdback_timeout:
+          self.I.logger.info("A job timed out")
+          self.parsejobs.remove(job)
+          job.queued = False
+          job.future.cancel()
 
   async def read(self, o, mi, ma):
     assert mi <= ma
@@ -381,12 +399,14 @@ class Interceptor(SocksProxy):
         break
 #      print(3, [s.fileno() for s in rsl], [s.fileno() for s in wsl], S.recv_ready(), S.send_ready());
       # Wait for new data. .recv() will also process the data by fulfilling all completed futures
-      rs, ws, es = select.select(rsl, wsl, [])
+      rs, ws, es = select.select(rsl, wsl, [], 1)
 #      print(4, [s.fileno() for s in rs], [s.fileno() for s in ws]);
       if S.socket in rs:
         S.recv()
       if C.socket in rs:
         C.recv()
+      C.check_timeouts()
+      S.check_timeouts()
       if S.socket in ws:
         S.flush_some()
       if C.socket in ws:
