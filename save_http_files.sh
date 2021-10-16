@@ -37,14 +37,18 @@ url2local(){
 url="https://$domain$location"
 dest="$(url2local "$url")"
 
-exec 9>".lock$dest"
-flock 9 || exit 1
-
 suattr(){
   setfattr -n "user.xdg.origin.url" -v "$url" "$1"
 }
 
 merge_all(){
+(
+  # Get global exclusive lock for the whole file / all parts
+  flock 9 || exit 1
+  if ! [ -d "d$dest" ]
+    then exit 1
+  fi
+  cd "d$dest" || exit 1
   prev=
   for next in $(printf "%s\n" *.part | grep -o '^[0-9]*' | sort -n)
   do
@@ -60,22 +64,34 @@ merge_all(){
         seek="$(bc <<<"$pend - $prev")"
         skip="$(bc <<<"$pend - $next")"
         echo "Merging part $next-$nend offset $skip to $prev-$pend offset $seek"
-        dd bs=4096 seek="$seek" skip="$skip" if="$next.part" of="$prev.part" iflag=skip_bytes oflag=seek_bytes conv=notrunc
+        # Open source file
+        exec 8<"$next.part"
+        # Try to get the lock. If it fails, abort. Another process is still writing to the file, which will call merge_all after that again anyway
+        flock -n 8 || exit 1
+        dd bs=4096 seek="$seek" skip="$skip" of="$prev.part" iflag=skip_bytes oflag=seek_bytes conv=notrunc <&8
         rm "$next.part"
         suattr "$prev.part"
       fi
     fi
     prev="$next"
   done
+  if [ -f "0.part" ] && [ $(printf "%s\n" *.part | wc -l) = 1 ]
+  then
+    ln -f "0.part" "../f$dest"
+    rm *.part
+    cd ..
+    rmdir "d$dest"
+  fi
+  exit 0
+) 9>".lock$dest";
 }
 
+# This is a soubrutine of the save() method. fd 9 is expected to have the global lock for the whole file
 save_partial(){
   local start="$1"; shift
   local end="$1"; shift
   local full="$1"; shift
-(
-  [ -d "d$dest" ] || mkdir "d$dest"
-  cd "d$dest"
+  cd "d$dest" || exit 1
   smaller=
   for p in $(printf "%s\n" *.part | grep -o '^[0-9]*' | sort -n)
   do
@@ -88,51 +104,63 @@ save_partial(){
     then f="$smaller"
   fi
   seek="$(bc <<<"$start - $f")"
-  echo "Saving part $start-$end offset $seek at: $(quote "d$dest")/$f.part"
   count="$(bc <<<"$end - $start")"
-  timeout 90 dd bs=4096 seek="$seek" of="$f.part" count="$count" iflag=skip_bytes,count_bytes oflag=seek_bytes conv=notrunc <&99
+  # Open the target file. Using >> to make sure it won't be truncated
+  exec 8>>"$f.part"
   suattr "$f.part"
-  if [ "$f" = 0 ]
-    then ln -f "0.part" "../f$dest"
-  fi
-  merge_all
-  if [ "$full" != '*' ] && [ "$f" = 0 ] && [ "$(wc -c 0.part | grep -o '^[0-9]*')" -ge "$full" ]
-  then
-    echo "File complete: $(quote "$dest")"
-    ln -f "0.part" "../f$dest"
-    rm *
-    cd ..
-    rmdir "d$dest"
-  fi
-);}
+  # Get a shared lock. It is fine if multiple processes write to it, because they are expected to write the same bytes to the same offsets.
+  # We take the lock because we don't want the file to be removed
+  flock -s 8
+  # Close our global exclusive lock for the whole file / all parts
+  exec 9>&-
+  echo "Saving part $start-$end offset $seek at: $(quote "d$dest")/$f.part"
+  # Note: Don't replace the of= with >&8, that wouldn't seek to the start!
+  dd bs=4096 seek="$seek" count="$count" iflag=skip_bytes,count_bytes oflag=seek_bytes conv=notrunc of=/proc/self/fd/8 <&99
+}
 
-if [ -n "$start" ]
-then
+save(){
+  # global exclusive lock for the whole file / all parts
+  exec 9>".lock$dest"
+  flock 9 || exit 1
+
+  mkdir -p "d$dest"
+  if [ -f "d$dest/0.part" ] && ! [ -f "f$dest" ]
+    then ln -f "d$dest/0.part" "f$dest"
+    else touch "f$dest"
+  fi
+  ln -f "f$dest" "d$dest/0.part"
+  suattr "f$dest"
+
   if [ -s "f$dest" ]
   then
     flen="$(wc -c "f$dest" | grep -o '^[0-9]*')"
     if [ "$full" != "*" ] && [ "$full" -le "$flen" ]
       then exit 0
     fi
-    if [ ! -f "d$dest/0.part" ]
-    then
-      [ -d "d$dest" ] || mkdir "d$dest"
-      ln "f$dest" "d$dest/0.part"
-    fi
-    if [ "$(wc -c "d$dest/0.part" | grep -o '^[0-9]*')" -lt "$flen" ]
-    then if ! [ "d$dest/0.part" -ef "f$dest" ]
-      then save_partial 0 "$flen" "$full" 99<"f$dest"
-    fi; fi
   fi
-  save_partial "$start" "$end" "$full"
-else
-  echo "Saving content at: $(quote "f$dest")"
-  dd bs=4096 of="f$dest" conv=notrunc <&99
-fi
 
-if [ -f "f$dest" ]
-  then suattr "f$dest"
-fi
+  if [ -n "$start" ]
+  then
+    save_partial "$start" "$end" "$full" & pid=$!
+    # Close our global exclusive lock for the whole file / all parts
+    # save_partial will still have it open, it's a different process, so it won't be released
+    exec 9>&-
+    wait $pid
+  else
+    echo "Saving content at: $(quote "f$dest")"
+    # Open the target file. Using >> to make sure it won't be truncated
+    exec 8>>"f$dest"
+    # Get a shared lock. It is fine if multiple processes write to it, because they are expected to write the same bytes to the same offsets.
+    # We take the lock because we don't want the file to be removed
+    flock -s 8
+    # Close our global exclusive lock for the whole file / all parts
+    exec 9>&-
+    # Saving the data...
+    # Note: Don't replace the of= with >&8, that wouldn't seek to the start!
+    dd bs=4096 iflag=skip_bytes,count_bytes oflag=seek_bytes conv=notrunc of=/proc/self/fd/8 <&99
+  fi
+  merge_all || return 1
+}
 
 recombine_extm3u(){
 
@@ -211,7 +239,12 @@ recombine_extm3u(){
   ) >"m3u$dest.m3u8"
 }
 
+save
+
 set +e
+
+exec 9>".lock$dest"
+flock 9 || exit 1
 
 if [ -f "f$dest" ]
 then
