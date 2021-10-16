@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import re
 import logging
 import ctypes, os, sys, errno
 import traceback, argparse
@@ -10,7 +11,8 @@ from socketserver import ThreadingMixIn, TCPServer, StreamRequestHandler
 
 SOCKS_VERSION = 5
 SO_ORIGINAL_DST = 80
-
+SOL_IPV6 = 41
+IP6T_SO_ORIGINAL_DST = 80
 
 def setprocname(file):
   name = os.path.basename(file)
@@ -23,7 +25,7 @@ def str2ipport(addr=None, dport=None, ad=True):
       if not ad:
         raise argparse.ArgumentTypeError("mode 'direct' not valid for this parameter")
       return None
-    ipport = s.rsplit(':',1)
+    ipport = s.rsplit(':',1) if s[-2:] != '::' else [s]
     if len(ipport) != 2:
       if ipport[0].isnumeric():
         if not addr:
@@ -38,46 +40,64 @@ def str2ipport(addr=None, dport=None, ad=True):
     return (ipport[0],int(ipport[1]))
   return parse
 
-def mksocket(via):
-  if not via:
-    return socket.socket()
-  else:
-    s = socks.socksocket()
-    s.set_proxy(socks.SOCKS5, via[0], via[1])
-    return s
-
 class ThreadingTCPServer(ThreadingMixIn, TCPServer):
-  pass
+  def __init__(self, server_address, RequestHandlerClass, bind_and_activate=True):
+    self.address_family = socket.AF_INET if re.fullmatch('(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)(\.(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)){3}', server_address[0]) else socket.AF_INET6
+    super().__init__(server_address, RequestHandlerClass, bind_and_activate)
 ThreadingTCPServer.allow_reuse_address = True
 
-
 class SocksProxy(StreamRequestHandler):
-  def rconnect(self, s, via):
-    if not via or self.remote_address == self.remote_domain:
+  def mksocket(self, via):
+    if not via:
+      return socket.socket(self.remote_family)
+    else:
+      s = socks.socksocket()
+      s.set_proxy(socks.SOCKS5, via[0], via[1])
+      return s
+
+  def rconnect(self, s, via, domain=None):
+    if domain is None:
+      domain = self.remote_domain
+    if not via or self.remote_address == domain:
       s.connect((self.remote_address, self.remote_port))
     else:
-      s.connect((self.remote_domain+'>'+self.remote_address, self.remote_port))
+      s.connect((domain+'>'+self.remote_address, self.remote_port))
 
   def handle(self):
     self.sdirect = None
+    self.remote_family = socket.AF_INET
     SocksProxy.id = SocksProxy.id + 1
     self.id = SocksProxy.id
     self.logger = logging.getLogger(f's{self.id}')
-    self.logger.info(f'Accepting connection from {self.client_address[0]}:{self.client_address[1]}')
+    self.logger.info(f'Accepting connection from {self.client_address[0]} :{self.client_address[1]}')
 
     transparent = False
     try:
       # Currently only dealing with IPv4
-      sockaddr_in = self.connection.getsockopt(socket.SOL_IP, SO_ORIGINAL_DST, 16)
-      (proto, port) = struct.unpack('!HH', sockaddr_in[:4])
-      assert proto == 512
-      self.remote_address = socket.inet_ntoa(sockaddr_in[4:8])
+      try:
+        sockaddr_in = self.connection.getsockopt(socket.SOL_IP, SO_ORIGINAL_DST, 16)
+        (proto, port) = struct.unpack('!HH', sockaddr_in[:4])
+        assert proto == 512
+        self.remote_address = socket.inet_ntop(socket.AF_INET, sockaddr_in[4:8])
+      except:
+        try:
+          sockaddr_in = self.connection.getsockopt(SOL_IPV6, IP6T_SO_ORIGINAL_DST, 28)
+          (proto, port) = struct.unpack('!HH', sockaddr_in[:4])
+          assert proto == 2560
+          self.remote_address = socket.inet_ntop(socket.AF_INET6, sockaddr_in[8:24])
+          self.remote_family = socket.AF_INET6
+        except:
+          raise
       self.remote_port = port
-      (draddr,drport) = self.connection.getsockname()
+      dr = self.connection.getsockname()
+      draddr = dr[0]
+      drport = dr[1]
       assert draddr != self.remote_address ## If original destination was the same as packet destination, probably no transparent proxying using iptables
       transparent = True
     except:
       pass
+
+    self.remote_domain = self.remote_address
 
     if transparent:
       assert self.remote_address
@@ -107,22 +127,31 @@ class SocksProxy(StreamRequestHandler):
 
     if address_type == 1:  # ipv4
       rawaddr = self.connection.recv(4)
-      self.remote_address = socket.inet_ntoa(rawaddr)
+      self.remote_address = socket.inet_ntop(socket.AF_INET, rawaddr)
+    elif address_type == 4:  # ipv6
+      rawaddr = self.connection.recv(16)
+      self.remote_address = socket.inet_ntop(socket.AF_INET6, rawaddr)
+      self.remote_family = socket.AF_INET6
     elif address_type == 3:  # domain
       rawaddr = self.connection.recv(1)
       domain_length = ord(rawaddr)
       self.remote_address = self.connection.recv(domain_length)
       rawaddr = rawaddr + self.remote_address
       self.remote_address = self.remote_address.decode()
+    else:
+      raise Exception("Unsupported socks address type")
     self.remote_port = struct.unpack('!H', self.connection.recv(2))[0]
 
-    res = self.remote_address.split('>', 1)
-    if len(res) == 2:
-      self.remote_address = res[1]
-      self.remote_domain = res[0]
-    else:
-      self.remote_domain = self.remote_address
-    res = None
+    self.remote_domain = self.remote_address
+    if address_type == 3: # domain
+      res = self.remote_address.split('>', 1)
+      if len(res) == 2:
+        self.remote_address = res[1]
+        self.remote_domain = res[0]
+      else:
+        self.remote_domain = self.remote_address
+      res = None
+      self.remote_family = socket.AF_INET6 if ':' in self.remote_address else socket.AF_INET
 
     assert self.remote_address
 
@@ -250,8 +279,8 @@ def pipe_sockets(sa, sb, b2a_buf=None, a2b_buf=None, logprefix='', logger=loggin
 
 class Transparent(SocksProxy):
   def remote_connect(self):
-    self.logger.info(f'{self.id}: Connecting to remote {self.remote_address}:{self.remote_port}')
-    s = mksocket(args.via)
+    self.logger.info(f'{self.id}: Connecting to remote {self.remote_address} :{self.remote_port}')
+    s = self.mksocket(args.via)
     self.rconnect(s, args.via)
     self.sdirect = s
 

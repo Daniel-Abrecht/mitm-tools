@@ -8,7 +8,7 @@ import asyncio
 import os, sys, signal, argparse, traceback
 import ssl, select, socket, struct, random
 from functools import total_ordering
-from socksproxy import SocksProxy, pipe_sockets, str2ipport, mksocket, setprocname
+from socksproxy import SocksProxy, ThreadingTCPServer, pipe_sockets, str2ipport, setprocname
 from socketserver import ThreadingMixIn, TCPServer, StreamRequestHandler
 from importlib.machinery import SourceFileLoader
 
@@ -360,14 +360,10 @@ class ProtocolInterceptor:
     if self.future and not self.future.done():
       self.future.cancel()
 
-class ThreadingTCPServer(ThreadingMixIn, TCPServer):
-  pass
-ThreadingTCPServer.allow_reuse_address = True
-
 class Interceptor(SocksProxy):
   def remote_connect(self):
-    self.logger.info(f'Connecting to remote {self.remote_domain}:{self.remote_port} via {self.remote_address}')
-    s = mksocket(args.via)
+    self.logger.info(f'Connecting to remote {self.remote_domain} :{self.remote_port} via {self.remote_address}')
+    s = self.mksocket(args.via)
     self.rconnect(s, args.via)
     self.sdirect = s
 

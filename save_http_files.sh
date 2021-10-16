@@ -90,7 +90,7 @@ save_partial(){
   seek="$(bc <<<"$start - $f")"
   echo "Saving part $start-$end offset $seek at: $(quote "d$dest")/$f.part"
   count="$(bc <<<"$end - $start")"
-  dd bs=4096 seek="$seek" of="$f.part" count="$count" iflag=skip_bytes,count_bytes oflag=seek_bytes conv=notrunc <&99
+  timeout 90 dd bs=4096 seek="$seek" of="$f.part" count="$count" iflag=skip_bytes,count_bytes oflag=seek_bytes conv=notrunc <&99
   suattr "$f.part"
   if [ "$f" = 0 ]
     then ln -f "0.part" "../f$dest"

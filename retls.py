@@ -3,19 +3,14 @@
 import logging
 import argparse
 import ssl, select, socket, struct, random
-from socksproxy import SocksProxy, pipe_sockets, str2ipport, mksocket, setprocname
+from socksproxy import SocksProxy, ThreadingTCPServer, pipe_sockets, str2ipport, setprocname
 from socketserver import ThreadingMixIn, TCPServer, StreamRequestHandler
-
-
-class ThreadingTCPServer(ThreadingMixIn, TCPServer):
-  pass
-ThreadingTCPServer.allow_reuse_address = True
 
 
 class ReTLS(SocksProxy):
   def remote_connect(self):
-    self.logger.info(f'Connecting to remote {self.remote_domain}:{self.remote_port} via {self.remote_address}')
-    with mksocket(args.via) as s:
+    self.logger.info(f'Connecting to remote {self.remote_domain} :{self.remote_port} via {self.remote_address}')
+    with self.mksocket(args.via) as s:
       ssock = context.wrap_socket(s, server_hostname=self.remote_domain)
       self.rconnect(ssock, args.via)
       self.sdirect = ssock

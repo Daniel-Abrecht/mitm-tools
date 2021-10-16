@@ -4,16 +4,11 @@ import logging
 import argparse
 import socket, struct, random
 import ssl, threading, socks, ctypes
-from socksproxy import SocksProxy, pipe_sockets, str2ipport, mksocket, setprocname
+from socksproxy import SocksProxy, ThreadingTCPServer, pipe_sockets, str2ipport, setprocname
 from tempfile import TemporaryFile
 from OpenSSL import crypto
 from contextlib import contextmanager
 from socketserver import ThreadingMixIn, TCPServer
-
-
-class ThreadingTCPServer(ThreadingMixIn, TCPServer):
-  pass
-ThreadingTCPServer.allow_reuse_address = True
 
 
 def readfile(file):
@@ -110,10 +105,10 @@ class TLSStripper(SocksProxy):
 
   def remote_connect(self):
     self.sdirect = None
-    logging.info(f'{self.id}: Connecting to remote {self.remote_address}:{self.remote_port}')
+    logging.info(f'{self.id}: Connecting to remote {self.remote_address} :{self.remote_port}')
     # Note: This is for non-mitm-ed / direct connections. We do this early, so we can refuse connections early too.
-    s = mksocket(args.via)
-    s.connect((self.remote_address, self.remote_port))
+    s = self.mksocket(args.via)
+    self.rconnect(s, args.via)
     self.sdirect = s
 
   def handle_socks(self):
@@ -207,11 +202,8 @@ class TLSStripper(SocksProxy):
         t1.daemon = True
         t1.start()
         with crt.context.wrap_socket(sb, server_side=True) as ssock:
-          s = mksocket(args.tls_via)
-          if sni == self.remote_address:
-            s.connect((self.remote_address, self.remote_port))
-          else:
-            s.connect((sni+'>'+self.remote_address, self.remote_port))
+          s = self.mksocket(args.tls_via)
+          self.rconnect(s, args.via, sni)
           pipe_sockets(s, ssock, logprefix=f'{self.id}: mitm decrypted out <=> remote: ')
       finally:
         sb.close()
