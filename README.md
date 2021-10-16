@@ -37,6 +37,22 @@ have some strange dnat rules and see it responding in socks when it shouldn't or
 
 ## untls.py
 
+```
+usage: untls.py [-h] [-l LISTEN] [-c VIA] [-t TLS_VIA] [--ca CA] [--ca-key CA_KEY]
+
+socks plain to tls proxy
+
+optional arguments:
+  -h, --help            show this help message and exit
+  -l LISTEN, --listen LISTEN
+                        IP:PORT to listen on (default: 0.0.0.0:1666)
+  -c VIA, --via VIA     IP:PORT of socks proxy to connect to for undecryptable traffic, or "direct" for none (default: 127.0.0.1:2666)
+  -t TLS_VIA, --tls-via TLS_VIA
+                        IP:PORT of socks proxy to connect to for decrypted traffic (default: 127.0.0.1:3666)
+  --ca CA
+  --ca-key CA_KEY
+```
+
 Listens on port `0.0.0.0:1666`. After a connection, it first tries to connect to the destination over socks on `127.0.0.1:2666`. Only if that
 works, it'll accept the socks connection, otherwise, it rejects it. It then just reads from the connection, and tries to figure out
 if it's TLS using lot's of checks, so it can figure out if it isn't as early as possible, and tries to parse the SNI.
@@ -51,9 +67,33 @@ install `/etc/ssl/CA/CA.pem` on the device to be MITMd.
 
 ## socksproxy.py
 
-Listens on port `127.0.0.1:2666`. This is just a normal socks proxy.
+```
+usage: socksproxy.py [-h] [-l LISTEN] [-c VIA]
+
+socks plain to tls proxy
+
+optional arguments:
+  -h, --help            show this help message and exit
+  -l LISTEN, --listen LISTEN
+                        IP:PORT to listen on (default: 127.0.0.1:2666)
+  -c VIA, --via VIA     IP:PORT of socks proxy to connect to, or "direct" for none (default: direct)
+```
+
+Per default, this listens on port `127.0.0.1:2666`, and is just a normal socks proxy.
 
 ## retls.py
+
+```
+usage: retls.py [-h] [-l LISTEN] [-c VIA]
+
+socks plain to tls proxy
+
+optional arguments:
+  -h, --help            show this help message and exit
+  -l LISTEN, --listen LISTEN
+                        IP:PORT to listen on (default: 127.0.0.1:3666)
+  -c VIA, --via VIA     IP:PORT of socks proxy to connect to, or "direct" for none (default: direct)
+```
 
 Listens on port `127.0.0.1:3666`. This is a socks proxy, but which takes a plain connection and connects to it's target using TLS.
 It can use the extended domain format explained above (ex. `example.com>127.0.0.1`) for getting the address to connect to and
@@ -69,6 +109,35 @@ iptables -t nat -A PREROUTING -i eth0 -p tcp -j REDIRECT --to-ports 1666
 ```
 
 Then, set the host on which the proxy runs and the iptables rules where added as the gataway for the host whose traffic is to be MITMd.
+
+# interceptor.py
+
+```
+usage: interceptor.py [-h] -l LISTEN -c VIA
+```
+
+This socks proxy can be put between the other socks proxies above.
+It loads all the interceptor modules from the interceptor directory.
+If no interceptor is able to make sense of the traffic, or if all
+interceptors agree they won't alter it, it is let through unaltered.
+
+## interceptor/http.py
+
+This is currenlt the only interceptor available. It transparently intercepts
+http traffic, any byte it analyxes will be forwarded unchanged basically immediately.
+It can analyze & decode variouse transfer & content encodings, and should be able
+to handle http proxies, http upgrades, and such stuff.
+
+When any file or part of file is requested, calls `save_http_files.sh`, which stores
+it insode the directory `intercepted/http/`. save_http_files.sh tries to reassemble
+the files. Files being written to or incomplete are in directories named
+`d:<host>-<hashoflocation>/<byteoffset>.part`. Consecutive or overlapping parts are
+consolidated. If a file has been stored & is continous starting from the first byte,
+it is assumed to be complete until later bytes for the same file are requested. It'll
+be available under the name `f:<host>-<hashoflocation>`. If the file is determined
+to be a m3u playlist file, it will parse it and create/update an additional playlist
+named `m3u:<host>-<hashoflocation>.m3u8`, the files in which will match the final
+names of the referenced files after / if they are intercepted/stored.
 
 ## Remotely capturing traffic using wireshark
 
