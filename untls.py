@@ -59,12 +59,13 @@ class CertGen:
         cert.add_extensions([
           crypto.X509Extension(b"basicConstraints", False, b"CA:FALSE"),
           crypto.X509Extension(b"subjectKeyIdentifier", False, b"hash", subject=cert),
+          crypto.X509Extension(b"subjectAltName", False, ("DNS:"+name).encode('utf-8')),
         ])
 
         cert.add_extensions([
           crypto.X509Extension(b"authorityKeyIdentifier", False, b"keyid:always", issuer=self.ca_cert),
           crypto.X509Extension(b"extendedKeyUsage", False, b"serverAuth"),
-          crypto.X509Extension(b"keyUsage", False, b"digitalSignature"),
+          crypto.X509Extension(b"keyUsage", False, b"digitalSignature, keyEncipherment"),
         ])
 
         cert.set_issuer(self.ca_cert.get_subject())

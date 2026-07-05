@@ -31,6 +31,7 @@ if __name__ == '__main__':
   parser.add_argument('-l', '--listen', type=str2ipport('127.0.0.1', 3666, False), help='IP:PORT to listen on', default='127.0.0.1:3666')
   parser.add_argument('-c', '--via', type=str2ipport(), help='IP:PORT of socks proxy to connect to, or "direct" for none', default='direct')
   args = parser.parse_args()
-  context = ssl.create_default_context()
+  context = ssl.create_default_context(ssl.Purpose.SERVER_AUTH)
+  context.set_alpn_protocols([])
   with ThreadingTCPServer(args.listen, ReTLS) as server:
     server.serve_forever()

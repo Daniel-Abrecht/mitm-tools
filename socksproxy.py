@@ -42,7 +42,7 @@ def str2ipport(addr=None, dport=None, ad=True):
 
 class ThreadingTCPServer(ThreadingMixIn, TCPServer):
   def __init__(self, server_address, RequestHandlerClass, bind_and_activate=True):
-    self.address_family = socket.AF_INET if re.fullmatch('(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)(\.(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)){3}', server_address[0]) else socket.AF_INET6
+    self.address_family = socket.AF_INET if re.fullmatch('(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)(\\.(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)){3}', server_address[0]) else socket.AF_INET6
     super().__init__(server_address, RequestHandlerClass, bind_and_activate)
 ThreadingTCPServer.allow_reuse_address = True
 
@@ -93,6 +93,7 @@ class SocksProxy(StreamRequestHandler):
       draddr = dr[0]
       drport = dr[1]
       assert draddr != self.remote_address ## If original destination was the same as packet destination, probably no transparent proxying using iptables
+      assert draddr != '::ffff:' + self.remote_address # IPv4 over IPv6 annoyances
       transparent = True
     except:
       pass
